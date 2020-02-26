@@ -1,0 +1,264 @@
+package com.sams.ccpa.controller;
+
+import java.io.FileWriter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.client.HttpClientErrorException.NotFound;
+import org.springframework.web.client.RestTemplate;
+
+import com.opencsv.bean.ColumnPositionMappingStrategy;
+import com.opencsv.bean.StatefulBeanToCsv;
+import com.opencsv.bean.StatefulBeanToCsvBuilder;
+import com.sams.ccpa.bean.atg.AuthorizationBean;
+import com.sams.ccpa.bean.atg.ResponseBean;
+import com.sams.ccpa.bean.ch.csv.AtgFile;
+import com.sams.ccpa.bean.ch.csv.CsvFileWriter;
+import com.sams.ccpa.bean.ch.response.AuthResponse;
+import com.sams.ccpa.bean.ch.response.CCPATicket;
+import com.sams.ccpa.config.atg.ATGConfig;
+import com.sams.ccpa.config.atg.ATGFileConfig;
+import com.sams.ccpa.config.ch.AtgClientConfig;
+import com.sams.ccpa.config.ch.ClearingHouseConfig;
+import com.sams.ccpa.header.ATGHeader;
+import com.sams.ccpa.resttemplate.RestTemplateImp;
+import com.sams.ccpa.resttemplate.RestTemplateProxy;
+import com.sams.ccpa.util.EncryptionUtils;
+import com.sams.ccpa.util.EpochTime;
+
+@RestController
+@RequestMapping("ch")
+public class ClearingHouseController {
+	@Autowired
+	AuthorizationBean authBean;
+
+	@Autowired
+	EncryptionUtils encrypt;
+
+	@Autowired
+	EpochTime epochTime;
+
+	@Autowired
+	ClearingHouseConfig chConfig;
+
+	@Autowired
+	AtgClientConfig clientConfig;
+
+	@Autowired
+	ATGConfig atgConfig;
+
+	@Autowired
+	ATGFileConfig atgFileConfig;
+
+	private int assetNumber;
+
+	@GetMapping("/listalltickets")
+	public List<AtgFile> getCCPATickets(
+			@RequestParam(value = "assetNumber", defaultValue = "825", required = false) int assetNumber,
+			@RequestParam(value = "dateFilter", defaultValue = "Last 60 days") String dateFilter,
+			@RequestParam(value = "offset", defaultValue = "0") int offset,
+			@RequestParam(value = "limit", defaultValue = "250") int limit,
+			@RequestParam(value = "state", defaultValue = "open") String state,
+			@RequestParam(value = "type", defaultValue = "Optout") String type
+
+	) {
+		int count = 250;
+		int ticketCount = 0;
+		List<CCPATicket> tickets = Collections.emptyList();
+
+		System.out.println("in get ticckets:" + assetNumber);
+		this.assetNumber = assetNumber;
+		String authcode = authForClearHouseApi();
+		HttpHeaders headers = new HttpHeaders(new LinkedMultiValueMap<>(chConfig.getCaHeader()));
+
+//		String apiURL = null;
+//		apiURL = chConfig.getTicketUrl();
+//		StringBuilder apiURL = new StringBuilder();
+//		apiURL.append(chConfig.getTicketUrl())
+//			.append("dateFilter=")
+//			.append(dateFilter)
+//			.append("&assetNumber=")
+//			.append(assetNumber)
+//			.append("&offset=")
+//			.append(offset)
+//			.append("&limit=")
+//			.append(limit)
+//			;
+		headers.set("Authorization", authcode);
+		HttpEntity<String> requestEntity = new HttpEntity<>(headers);
+
+		while (count >= 250) {
+			RestTemplateImp rest = new RestTemplateImp(new RestTemplateProxy());
+			RestTemplate restTemplate = rest.restTemplateAlgo.getRestTemplate();
+
+			List<CCPATicket> partialTickets = Collections.emptyList();
+			offset += ticketCount;
+			// String apiURL = chConfig.getTicketUrl();
+			StringBuilder apiURL = new StringBuilder();
+			apiURL.append(chConfig.getTicketUrl()).append("dateFilter=").append(dateFilter).append("&assetNumber=")
+					.append(assetNumber).append("&offset=").append(offset).append("&limit=").append(limit)
+					.append("&state=").append(state);
+
+			System.out.println("apiURL .." + apiURL.toString());
+			ResponseEntity<List<CCPATicket>> result = restTemplate.exchange(apiURL.toString(), HttpMethod.GET,
+					requestEntity, new ParameterizedTypeReference<List<CCPATicket>>() {
+					});
+
+			if (result.getStatusCode() != HttpStatus.NO_CONTENT) {
+				tickets = result.getBody();
+				count = partialTickets.size();
+				System.out.println("count.." + count);
+				offset += limit;
+				ticketCount += count;
+				// tickets.addAll(partialTickets);
+			} else {
+				count = 0;
+			}
+		}
+
+//	tickets.stream().filter(ticket->ticket.getState().equals("Open"))
+//				.collect(Collectors.toList());
+		System.out.println("Record Count.." + tickets.size());
+		// return tickets;
+		return copyFileToCsvFormat(tickets);
+	}
+
+	private List<AtgFile> copyFileToCsvFormat(List<CCPATicket> tickets) {
+		List<AtgFile> atgFileList = new ArrayList<AtgFile>();
+		;
+		for (CCPATicket ticket : tickets) {
+			AtgFile atgFile = new AtgFile();
+//			atgFile.setNumber(ticket.getNumber());
+//			atgFile.setState(ticket.getState());
+//			atgFile.setRequest_item(ticket.getRequestItem());
+//			atgFile.setSys_id(ticket.getSysId());
+			atgFile.setRequest_type(ticket.getVariables().getRequestType());
+//			atgFile.setPi_first_name(ticket.getVariables().getPiFirstName());
+//			atgFile.setPi_last_name(ticket.getVariables().getPiLastName());
+//			atgFile.setPi_email(ticket.getVariables().getPiEmail());
+			atgFile.setDue_date(ticket.getVariables().getDueDate());
+//			atgFile.setIntakeID(ticket.getVariables().getPiBlob().getIntakeID());
+//			atgFile.setRequestTimestamp(ticket.getVariables().getPiBlob().getRequestTimestamp());
+			BeanUtils.copyProperties(ticket, atgFile);
+			BeanUtils.copyProperties(ticket.getVariables(), atgFile);
+			BeanUtils.copyProperties(ticket.getVariables().getPiBlob(), atgFile);
+
+			String memberId = null;
+			memberId = ticket.getVariables().getPiBlob().getCustomerID();
+
+			// System.out.println("memberId.." + memberId);
+			if (memberId == null)
+				memberId = "";
+
+			System.out.println("after memberId.." + memberId);
+			atgFile.setCustomerID("'" + memberId);
+			if (!memberId.equals("")) {
+
+				getAuthorization(memberId);
+
+				String apiURL = new StringBuilder().append(atgConfig.getURL()).append("/soa/services/v1/profile/")
+						.append(authBean.getEncryptedId()).append("/profile/").toString();
+
+				System.out.println("URL: " + apiURL);
+				ATGHeader header = new ATGHeader(authBean, atgConfig);
+				HttpEntity<String> httpEntity = new HttpEntity<>(header.getHeader());
+
+				try {
+					RestTemplateImp rest = new RestTemplateImp(new RestTemplateProxy());
+					RestTemplate restTemplate = rest.restTemplateAlgo.getRestTemplate();
+
+					ResponseEntity<ResponseBean> resp = restTemplate.exchange(apiURL.toString(), HttpMethod.GET,
+							httpEntity, ResponseBean.class);
+					System.out.println("STATUS CODE:" + resp.getStatusCode());
+
+					ResponseBean response = new ResponseBean();
+					response = resp.getBody();
+					atgFile.setOptoutFlag(response.getPayload().getCcpaOptout());
+					atgFile.setDeleteFlag(response.getPayload().getCcpaDelete());
+				} catch (NotFound e) {
+					atgFile.setOptoutFlag("");
+					atgFile.setDeleteFlag("");
+				}
+			}
+
+			// write.csvFileWrite(atgFileList, filePath);
+
+			atgFileList.add(atgFile);
+		}
+		
+		CsvFileWriter<AtgFile> write = new CsvFileWriter<>();
+		String filePath = "./src/main/resources/AtgReportFile.csv";
+		
+		List<AtgFile> atgFileListNew = new ArrayList<AtgFile>();
+		atgFileListNew = atgFileList.stream().filter(atg->"OptOut".equals(atg.getRequest_type())).collect(Collectors.toList());
+		write.csvFileWrite(atgFileListNew, filePath);
+
+		return atgFileList;
+	}
+
+	private void getAuthorization(String memberId) {
+		String encryptedId;
+		String auth;
+		long epoch;
+
+		encryptedId = encrypt.getEncryptMembershipId(memberId);
+		auth = encrypt.getAuthorization(memberId);
+		epoch = epochTime.getGMTEpocTime();
+//		System.out.println("***************************************");
+//		System.out.println("Epoch Time-->" + epoch);
+
+		if (authBean == null) {
+			authBean = new AuthorizationBean(encryptedId, auth, epoch);
+		} else {
+			authBean.setEncryptedId(encryptedId);
+			authBean.setAuth(auth);
+			authBean.setEpoch(epoch);
+		}
+	}
+
+	@Bean
+	// @GetMapping("/auth")
+	public String authForClearHouseApi() {
+
+		System.out.println("in Auth ..");
+		HttpHeaders headers = new HttpHeaders(new LinkedMultiValueMap<>(chConfig.getAuthHeader()));
+
+		MultiValueMap<String, String> map = new LinkedMultiValueMap<>(chConfig.getAuth());
+		map.add("client_id", clientConfig.getClient_id());
+		map.add("client_secret", clientConfig.getClient_secret());
+
+		HttpEntity<MultiValueMap<String, String>> requestToAuth = new HttpEntity<>(map, headers);
+
+		ResponseEntity<AuthResponse> response = null;
+
+		RestTemplateImp rest = new RestTemplateImp(new RestTemplateProxy());
+		RestTemplate restTemplate = rest.restTemplateAlgo.getRestTemplate();
+//		System.out.println("Auth .." + map.toString());
+//		System.out.println("Header .." + headers.toString());
+//		System.out.println("Auth URL.." + chConfig.getAuthUrl());
+
+		response = restTemplate.postForEntity(chConfig.getAuthUrl(), requestToAuth, AuthResponse.class);
+		String access_token = response.getBody().getaccess_token();
+		System.out.println("got auth token");
+		System.out.println(access_token);
+		return response.getBody().getaccess_token();
+
+	}
+}
