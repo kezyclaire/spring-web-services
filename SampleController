@@ -1,0 +1,472 @@
+package com.sams.ccpa.atg.controller;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.client.HttpClientErrorException.NotFound;
+import org.springframework.web.client.RestTemplate;
+
+import com.sams.ccpa.atg.bean.AuthorizationBean;
+import com.sams.ccpa.atg.bean.DeleteBean;
+import com.sams.ccpa.atg.bean.OptOutBean;
+import com.sams.ccpa.atg.bean.OptOutDeleteAtgBean;
+import com.sams.ccpa.atg.bean.OptOutDeleteBean;
+import com.sams.ccpa.atg.bean.OptoutPutBean;
+import com.sams.ccpa.atg.bean.OptoutPutPayload;
+import com.sams.ccpa.atg.bean.OptoutPutPayloadString;
+import com.sams.ccpa.atg.bean.OptoutPutString;
+import com.sams.ccpa.atg.bean.ResponseBean;
+import com.sams.ccpa.atg.config.ATGConfiguration;
+import com.sams.ccpa.atg.config.ATGFileConfig;
+import com.sams.ccpa.atg.exceptions.ATGErrorResponse;
+import com.sams.ccpa.atg.header.ATGHeader;
+import com.sams.ccpa.atg.proxy.ATGProxy;
+import com.sams.ccpa.atg.utils.ATGFile;
+import com.sams.ccpa.atg.utils.CSVFileReaderUtils;
+import com.sams.ccpa.atg.utils.EncryptionUtils;
+import com.sams.ccpa.atg.utils.EpochTime;
+
+@RestController
+@RequestMapping("atg")
+// @Controller
+public class ATGController {
+	
+	@Autowired
+	AuthorizationBean authBean;
+	
+	@Autowired
+	EncryptionUtils encrypt;
+	
+	@Autowired
+	EpochTime epochTime;
+	
+	@Autowired
+	ATGConfiguration atgConfig;
+	
+	@Autowired
+	ATGFileConfig atgFileConfig;
+	
+//	AuthorizationBean authBean;
+	
+	@GetMapping("/auth/{memberId}")
+	public AuthorizationBean getAuthorizationATG (@PathVariable String memberId) {	
+		getAuthorization(memberId);
+		return authBean;
+	} 
+
+	@GetMapping("/optoutdeleteatg/{memberId}")
+	public ResponseBean getOptOutDeleteATG (@PathVariable String memberId) {	
+		getAuthorization(memberId);
+
+		String apiURL = new StringBuilder()
+				.append(atgConfig.getURL())
+				.append("/soa/services/v1/profile/")
+				.append(authBean.getEncryptedId()).append("/profile/").toString();
+
+		System.out.println("URL: " + apiURL);
+		ATGHeader header = new ATGHeader(authBean, atgConfig);
+		HttpEntity<String> httpEntity = new HttpEntity<>(header.getHeader());
+		
+		ATGProxy atgProxy = new ATGProxy();
+		RestTemplate restTemplate = new RestTemplate(atgProxy.getClientHttpClient());
+//		RestTemplate restTemplate = new RestTemplate();
+
+		
+		OptOutDeleteAtgBean optdel = new OptOutDeleteAtgBean();
+		ResponseEntity<OptOutDeleteAtgBean> resp = restTemplate.exchange(apiURL.toString(),
+				HttpMethod.GET, httpEntity, OptOutDeleteAtgBean.class);
+		System.out.println("STATUS CODE:" + resp.getStatusCode());
+		
+		optdel = resp.getBody();		
+		//System.out.println("atg reply:" + optdel.toString());
+		//System.out.println("Email address:" + optdel.getPayload().getEmail());
+		
+		ResponseBean response = new ResponseBean(optdel.getStatus(), optdel.getPayload(), apiURL);
+		return response;
+	}
+	
+	@GetMapping("/filelist")
+	public List<OptOutDeleteBean> getFileList () {	
+		List<ATGFile> ticketsList = new ArrayList<ATGFile>();
+		List<OptOutDeleteBean> fileList = new ArrayList<OptOutDeleteBean>();
+		String filePath = atgFileConfig.getFileLoc() + atgFileConfig.getFileName();
+		System.out.println("filePath:" + filePath);
+		ticketsList = CSVFileReaderUtils.csvFileRead(filePath);
+		for (ATGFile atgFile : ticketsList) {
+			OptOutDeleteBean optoutDelete = getOptOutDelete(atgFile.getCustomerId());
+			//System.out.println("ccpa Optout:" + optoutDelete.getCcpaOptout());
+			fileList.add(optoutDelete);
+		}
+		
+		return fileList;
+	}
+	
+	@PutMapping("/optoutFlag/{memberId}/{flagUpdate}")
+	public String putOptoutFlag (@PathVariable String memberId, @PathVariable String flagUpdate) {	
+		OptOutDeleteBean optoutDelete = getOptOutDelete(memberId);
+		System.out.println("GetMapping:" + optoutDelete);
+		
+		String response = "";
+		String email = optoutDelete.getEmail();
+		String optoutFlag = optoutDelete.getCcpaOptout().toLowerCase();
+		if(!email.equals("") && !optoutFlag.equals(flagUpdate)) {
+			response = updateOptoutFlag(optoutDelete.getEmail(), flagUpdate);
+			System.out.println("Email:" + optoutDelete.getEmail());
+			System.out.println("Update Optout Flag to " + flagUpdate);
+		}else if(email.equals("")) {
+			response = "Record not Found";
+			System.out.println("Record not Found");
+		}else if(optoutFlag.equals(flagUpdate)) {
+			response = optoutDelete.getEmail() + ", OptoutFlag is already " + flagUpdate;
+			System.out.println("Email:" + optoutDelete.getEmail());
+			System.out.println("OptoutFlag is already " + flagUpdate);
+		}
+		return response;
+	}
+	
+	@PutMapping("/filelist/{flag}")
+	public String putFileList (@PathVariable String flag) {	
+		List<ATGFile> ticketsList = new ArrayList<ATGFile>();
+		String filePath = atgFileConfig.getFileLoc() + atgFileConfig.getFileName();
+		System.out.println("filePath:" + filePath);
+		ticketsList = CSVFileReaderUtils.csvFileRead(filePath);
+		for (ATGFile atgFile : ticketsList) {
+			OptOutDeleteBean optoutDelete = getOptOutDelete(atgFile.getCustomerId());
+			System.out.println("Before:" + optoutDelete);
+			
+			String response = "";
+			String email = optoutDelete.getEmail();
+			String optoutFlag = optoutDelete.getCcpaOptout().toLowerCase();
+			String deleteFlag = optoutDelete.getCcpaDelete().toLowerCase();
+			String requestType = atgFile.getRequestType().toLowerCase();
+			if(email != "" ) {
+				System.out.println("request Type: " + atgFile.getRequestType().toLowerCase());
+				if ( requestType.trim().equals("optout") && !optoutFlag.equals(flag.toLowerCase()) ) {
+					//System.out.println("optout to " + flag);
+					response = updateOptoutFlag(optoutDelete.getEmail(), flag.toLowerCase());
+					System.out.println("Email:" + optoutDelete.getEmail());
+					System.out.println("Update Optout Flag to " + flag);
+					System.out.println("optoutResponse: " + response);
+				}
+				else if (requestType.trim().equals("delete") && !deleteFlag.equals(flag.toLowerCase())){
+					//response = updateDeleteFlag(optoutDelete.getEmail(), flag.toLowerCase());
+					System.out.println("Email:" + optoutDelete.getEmail());
+					System.out.println("Update Delete Flag to " + flag);
+					System.out.println("optoutResponse: " + response);
+				}
+//				OptOutDeleteBean optoutDeleteAfter = getOptOutDelete(atgFile.getCustomerId());
+//				System.out.println("After:" + optoutDeleteAfter);
+			}else if(email == "") {
+				System.out.println("Record not Found");
+			}else if(optoutFlag == flag) {
+				System.out.println("OptoutFlag is already been updated.");
+			}
+			System.out.println("********************************");
+		}
+		
+		return "Done updating list";
+	}
+	
+	@PutMapping("/optoutString/{memberId}")
+	public String putOptoutString (@PathVariable String memberId) {	
+		getAuthorization(memberId);
+			
+		String apiURL = new StringBuilder()
+				.append(atgConfig.getURL())
+				.append("/soa/services/v1/profile/account/updateCCPAOptOutFlag")
+				.toString();
+		
+		Boolean optoutFlag = true; 
+		String email = "xbcaycee_mjiatnlb@samsmoc.com";
+		
+		OptoutPutPayloadString payload = new OptoutPutPayloadString(email, "true");
+		OptoutPutString optout = new OptoutPutString(payload);
+//		System.out.println("URL: " + apiURL);
+		ATGHeader headerPut = new ATGHeader(authBean, atgConfig);
+		HttpEntity<OptoutPutString> httpEntityPut = new HttpEntity<>(optout, headerPut.getHeader());
+		
+		ATGProxy atgProxy = new ATGProxy();
+		RestTemplate restTemplate = new RestTemplate(atgProxy.getClientHttpClient());
+		ResponseEntity<String> resp = restTemplate.exchange(apiURL.toString(),
+				HttpMethod.PUT, httpEntityPut, String.class);
+//		System.out.println("STATUS CODE:" + resp.getStatusCode());
+		
+		String updateResponse = resp.getBody();
+		
+		return updateResponse;
+	}
+	
+	@PutMapping("/deleteString/{memberId}")
+	public String putDeleteString (@PathVariable String memberId) {	
+		OptOutDeleteBean optoutDelete = getOptOutDelete(memberId);
+		System.out.println(optoutDelete);
+		return updateDeleteFlag(optoutDelete.getEmail(), "true");
+	}
+	
+	@PutMapping("/optout/{memberId}")
+	public OptoutPutBean putOptout (@PathVariable String memberId) {	
+		getAuthorization(memberId);
+			
+		String apiURL = new StringBuilder()
+				.append(atgConfig.getURL())
+				.append("/soa/services/v1/profile/")
+				.append(authBean.getEncryptedId()).append("/profile/").toString();
+		
+		Boolean optoutFlag = true;
+		String email = "xbcaycee_mjiatnlb@samsmoc.com";
+		
+		OptoutPutPayload payload = new OptoutPutPayload(email, optoutFlag);
+		OptoutPutBean optout = new OptoutPutBean(payload);
+		System.out.println("URL: " + apiURL);
+		ATGHeader headerPut = new ATGHeader(authBean, atgConfig);
+		HttpEntity<OptoutPutBean> httpEntityPut = new HttpEntity<>(optout, headerPut.getHeader());
+		
+		ATGProxy atgProxy = new ATGProxy();
+		RestTemplate restTemplate = new RestTemplate(atgProxy.getClientHttpClient());
+		ResponseEntity<String> resp = restTemplate.exchange(apiURL.toString(),
+				HttpMethod.PUT, httpEntityPut, String.class);
+		System.out.println("STATUS CODE:" + resp.getStatusCode());
+		
+		String updateResponse = resp.getBody();
+		
+//		return updateResponse;
+		return optout;
+	}
+	
+	@GetMapping("/access/{memberId}")
+	public ResponseBean getAccess (@PathVariable String memberId) {	
+		getAuthorization(memberId);
+
+		String apiURL = new StringBuilder()
+				.append(atgConfig.getURL())
+				.append("/soa/services/v1/profile/")
+				.append(authBean.getEncryptedId()).append("/profile/largeccpa").toString();
+
+		System.out.println("URL: " + apiURL);
+		ATGHeader header = new ATGHeader(authBean, atgConfig);
+		HttpEntity<String> httpEntity = new HttpEntity<>(header.getHeader());
+		
+		ATGProxy atgProxy = new ATGProxy();
+		RestTemplate restTemplate = new RestTemplate(atgProxy.getClientHttpClient());
+//		RestTemplateCust restTemplate = new RestTemplateCust();
+//		restTemplate.setProxy("qa");
+
+		ResponseBean response = new ResponseBean();
+		ResponseEntity<ResponseBean> resp = restTemplate.exchange(apiURL.toString(),
+				HttpMethod.GET, httpEntity, ResponseBean.class);
+		System.out.println("STATUS CODE:" + resp.getStatusCode());
+		response = resp.getBody();		
+		
+		return response;
+	}
+	
+	@GetMapping("/optoutdeleteatgerror/{memberId}")
+	public ATGErrorResponse getOptOutDeleteATGError (@PathVariable String memberId) {	
+		getAuthorization(memberId);
+
+		String apiURL = new StringBuilder()
+				.append(atgConfig.getURL())
+				.append("/soa/services/v1/profile/")
+				.append(authBean.getEncryptedId()).append("/profile/").toString();
+
+		System.out.println("URL: " + apiURL);
+		ATGHeader header = new ATGHeader(authBean, atgConfig);
+		HttpEntity<String> httpEntity = new HttpEntity<>(header.getHeader());
+		
+		ATGProxy atgProxy = new ATGProxy();
+		RestTemplate restTemplate = new RestTemplate(atgProxy.getClientHttpClient());
+
+		ATGErrorResponse response = new ATGErrorResponse();
+		ResponseEntity<ATGErrorResponse> resp = restTemplate.exchange(apiURL.toString(),
+				HttpMethod.GET, httpEntity, ATGErrorResponse.class);
+		System.out.println("STATUS CODE:" + resp.getStatusCode());
+		response = resp.getBody();		
+		
+		return response;
+	}
+	  
+	@GetMapping("/optout/{memberId}")
+	public OptOutBean getOptOutFlag (@PathVariable String memberId) {	
+		getAuthorization(memberId);
+
+		System.out.println("Environment-->" + atgConfig.getWM_SVC_ENV());
+
+		String apiURL = new StringBuilder()
+				.append(atgConfig.getURL())
+				.append("/soa/services/v1/profile/")
+				.append(authBean.getEncryptedId()).append("/profile/").toString();
+
+		ATGHeader header = new ATGHeader(authBean, atgConfig);
+		HttpEntity<String> httpEntity = new HttpEntity<>(header.getHeader());
+		
+		ATGProxy atgProxy = new ATGProxy();
+		RestTemplate restTemplate = new RestTemplate(atgProxy.getClientHttpClient());
+
+		ResponseBean response = new ResponseBean();
+		ResponseEntity<ResponseBean> resp = restTemplate.exchange(apiURL.toString(),
+				HttpMethod.GET, httpEntity, ResponseBean.class);
+		System.out.println("STATUS CODE:" + resp.getStatusCode());
+		response = resp.getBody();
+		
+		OptOutBean optout = new OptOutBean();
+		BeanUtils.copyProperties(response.getPayload(), optout);
+
+		return optout;
+	}
+	
+	@GetMapping("/optoutdelete/{memberId}")
+	public OptOutDeleteBean getOptOutDeleteFlag(@PathVariable String memberId) {	
+		return getOptOutDelete(memberId);
+	}
+	
+	@GetMapping("/delete/{memberId}")
+	public DeleteBean getDeleteFlag (@PathVariable String memberId) {	
+		getAuthorization(memberId);
+
+		System.out.println("Environment-->" + atgConfig.getWM_SVC_ENV());
+
+		String apiURL = new StringBuilder()
+				.append(atgConfig.getURL())
+				.append("/soa/services/v1/profile/")
+				.append(authBean.getEncryptedId()).append("/profile/").toString();
+
+		ATGHeader header = new ATGHeader(authBean, atgConfig);
+		HttpEntity<String> httpEntity = new HttpEntity<>(header.getHeader());
+		
+		ATGProxy atgProxy = new ATGProxy();
+		RestTemplate restTemplate = new RestTemplate(atgProxy.getClientHttpClient());
+
+		ResponseBean response = new ResponseBean();
+		ResponseEntity<ResponseBean> resp = restTemplate.exchange(apiURL.toString(),
+				HttpMethod.GET, httpEntity, ResponseBean.class);
+		System.out.println("STATUS CODE:" + resp.getStatusCode());
+		response = resp.getBody();
+		
+		DeleteBean delete = new DeleteBean();
+		BeanUtils.copyProperties(response.getPayload(), delete);
+
+		return delete;
+	}
+
+	//@Bean
+	private void getAuthorization (String memberId) {
+		String encryptedId;
+		String auth;
+		long epoch;
+		
+		encryptedId = encrypt.getEncryptMembershipId(memberId);
+		auth = encrypt.getAuthorization(memberId);
+		epoch = epochTime.getGMTEpocTime();
+//		System.out.println("***************************************");
+//		System.out.println("Epoch Time-->" + epoch);
+		
+		if (authBean == null){
+			authBean = new AuthorizationBean(encryptedId, auth, epoch);	
+		} else {
+			authBean.setEncryptedId(encryptedId);
+			authBean.setAuth(auth);
+			authBean.setEpoch(epoch);
+		}
+	}
+	
+	
+	private OptOutDeleteBean getOptOutDelete( String memberId) {
+		getAuthorization(memberId);
+
+		String apiURL = new StringBuilder()
+				.append(atgConfig.getURL())
+				.append("/soa/services/v1/profile/")
+				.append(authBean.getEncryptedId()).append("/profile/").toString();
+		
+		ATGHeader header = new ATGHeader(authBean, atgConfig);
+		HttpEntity<String> httpEntity = new HttpEntity<>(header.getHeader());
+		
+		ATGProxy atgProxy = new ATGProxy();
+		RestTemplate restTemplate = new RestTemplate(atgProxy.getClientHttpClient());
+		OptOutDeleteBean optoutDelete = new OptOutDeleteBean();
+		try {
+			ResponseBean response = new ResponseBean();
+			ResponseEntity<ResponseBean> resp = restTemplate.exchange(apiURL.toString(),
+					HttpMethod.GET, httpEntity, ResponseBean.class);
+//			System.out.println("STATUS CODE:" + resp.getStatusCode());
+			response = resp.getBody();
+			//System.out.println(response.getPayload().getCcpaOptout());
+			BeanUtils.copyProperties(response.getPayload(), optoutDelete);
+			//System.out.println("ResponseBean: " + response.toString());
+//			optoutDelete.setMembershipId(memberId);
+//			optoutDelete.setEmail(response.getPayload().getEmail());
+//			optoutDelete.setCcpaDelete(response.getPayload().getCcpaDelete());
+//			optoutDelete.setCcpaOptout(response.getPayload().getCcpaOptout());
+			
+		} catch (NotFound e) {
+			optoutDelete.setMembershipId(memberId);
+			optoutDelete.setEmail("");
+			optoutDelete.setCcpaDelete("");
+			optoutDelete.setCcpaOptout("");
+			return optoutDelete;
+		} catch(Exception e ) {
+			optoutDelete.setMembershipId(memberId);
+			optoutDelete.setEmail("");
+			optoutDelete.setCcpaDelete("");
+			optoutDelete.setCcpaOptout("");
+			return optoutDelete;
+		}
+		
+		return optoutDelete;
+	}
+	
+	private String updateOptoutFlag(String email, String flag) {
+		String apiURLPut = new StringBuilder()
+				.append(atgConfig.getURL())
+				.append("/soa/services/v1/profile/account/updateCCPAOptOutFlag")
+				.toString();
+		
+		OptoutPutPayloadString payload = new OptoutPutPayloadString(email, flag.toLowerCase());
+		OptoutPutString optout = new OptoutPutString(payload);
+//		System.out.println("URL: " + apiURLPut);
+		ATGHeader headerPut = new ATGHeader(authBean, atgConfig);
+		HttpEntity<OptoutPutString> httpEntityPut = new HttpEntity<>(optout, headerPut.getHeader());
+		
+		ATGProxy atgProxyPut = new ATGProxy();
+		RestTemplate restTemplatePut = new RestTemplate(atgProxyPut.getClientHttpClient());
+		ResponseEntity<String> putResponse = restTemplatePut.exchange(apiURLPut,
+				HttpMethod.PUT, httpEntityPut, String.class);
+		System.out.println("STATUS CODE:" + putResponse.getStatusCode());
+		
+		return putResponse.getBody();
+	}
+	
+	private String updateDeleteFlag(String email, String flag) {
+		//getAuthorization(memberId);
+		String apiURL = new StringBuilder()
+				.append(atgConfig.getURL())
+				.append("/soa/services/v1/profile/account/updateCCPACancelOrDeleteFlag")
+				.toString();
+		
+		//Boolean optoutFlag = true; 
+		//String email = optoutDelete.getEmail();
+		OptoutPutPayloadString payload = new OptoutPutPayloadString(email, "true");
+		OptoutPutString optout = new OptoutPutString(payload);
+//		System.out.println("URL: " + apiURL);
+		ATGHeader headerPut = new ATGHeader(authBean, atgConfig);
+		HttpEntity<OptoutPutString> httpEntityPut = new HttpEntity<>(optout, headerPut.getHeader());
+		
+		ATGProxy atgProxy = new ATGProxy();
+		RestTemplate restTemplate = new RestTemplate(atgProxy.getClientHttpClient());
+		ResponseEntity<String> resp = restTemplate.exchange(apiURL.toString(),
+				HttpMethod.PUT, httpEntityPut, String.class);
+//		System.out.println("STATUS CODE:" + resp.getStatusCode());
+		
+		return resp.getBody();
+	}
+}
